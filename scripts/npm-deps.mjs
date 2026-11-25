@@ -285,8 +285,16 @@ const security = () => {
   withRollback(() => {
     const was = lockedDirectVersions();
     const out = npm(['audit', 'fix', '--json', '--no-force', '--no-fund'], { allowFailure: true });
-    const result = JSON.parse(out);
-    if (result.error) throw new Error(`npm audit fix failed: ${result.error.summary}`);
+    // Output can be empty (loglevel=silent) or mixed with script output; the re-audit below
+    // checks the result either way, so only an explicit npm error document fails here.
+    const error = (() => {
+      try {
+        return JSON.parse(out).error;
+      } catch {
+        return undefined;
+      }
+    })();
+    if (error) throw new Error(`npm audit fix failed: ${error.summary}`);
     const now = lockedDirectVersions();
     const crossed = [...now].filter(([name, to]) => {
       const a = parseVersion(was.get(name) ?? '');
