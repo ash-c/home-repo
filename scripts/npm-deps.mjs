@@ -87,6 +87,20 @@ const directDependencies = () => {
   return deps;
 };
 
+// Locked version of every direct declaration, including optional and peer, from a v1-v3 lockfile.
+const lockedDirectVersions = () => {
+  const pkg = readJson('package.json');
+  const lock = readJson('package-lock.json');
+  const fields = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
+  const names = new Set(fields.flatMap((f) => Object.keys(pkg[f] ?? {})));
+  return new Map(
+    [...names].map((name) => [
+      name,
+      lock.packages?.[`node_modules/${name}`]?.version ?? lock.dependencies?.[name]?.version,
+    ]),
+  );
+};
+
 const outdated = async () => {
   const deps = directDependencies();
   const results = await Promise.all(
@@ -269,15 +283,18 @@ const security = () => {
   // --no-force overrides any force=true from .npmrc or the environment. A direct dependency
   // whose declared range spans majors can still move to a new major, so roll that back.
   withRollback(() => {
-    const was = new Map(directDependencies().map((d) => [d.name, d.current]));
-    npm(['audit', 'fix', '--no-force', '--no-fund'], { allowFailure: true });
-    const crossed = directDependencies().filter((d) => {
-      const from = parseVersion(was.get(d.name) ?? '');
-      const to = parseVersion(d.current ?? '');
-      return from && to && !sameLine(from, to);
+    const was = lockedDirectVersions();
+    const out = npm(['audit', 'fix', '--json', '--no-force', '--no-fund'], { allowFailure: true });
+    const result = JSON.parse(out);
+    if (result.error) throw new Error(`npm audit fix failed: ${result.error.summary}`);
+    const now = lockedDirectVersions();
+    const crossed = [...now].filter(([name, to]) => {
+      const a = parseVersion(was.get(name) ?? '');
+      const b = parseVersion(to ?? '');
+      return a && b && !sameLine(a, b);
     });
     if (crossed.length > 0) {
-      const moves = crossed.map((d) => `${d.name} ${was.get(d.name)} → ${d.current}`).join(', ');
+      const moves = crossed.map(([name, to]) => `${name} ${was.get(name)} → ${to}`).join(', ');
       throw new Error(`npm audit fix moved a direct dependency to a new major (${moves})`);
     }
   });
