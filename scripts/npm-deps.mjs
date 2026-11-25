@@ -219,6 +219,18 @@ const regenerateLockfile = () => {
   }
 };
 
+// Restore package.json and package-lock.json if fn throws (e.g. npm rejects a peer conflict).
+const withRollback = (fn) => {
+  const saved = ['package.json', 'package-lock.json'].map((f) => [f, readFileSync(f, 'utf8')]);
+  try {
+    return fn();
+  } catch (error) {
+    for (const [f, text] of saved) writeFileSync(f, text);
+    console.error('Restored package.json and package-lock.json; run `npm ci` to resync node_modules.');
+    throw error;
+  }
+};
+
 const print = (json, markdown) =>
   process.stdout.write(flag('json') ? JSON.stringify(json, null, 2) + '\n' : markdown);
 
@@ -269,8 +281,10 @@ const security = () => {
     }
   }
   if (bumped) {
-    writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-    regenerateLockfile();
+    withRollback(() => {
+      writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+      regenerateLockfile();
+    });
   } else if (flag('nested')) {
     regenerateLockfile();
   }
@@ -303,8 +317,10 @@ const update = async () => {
       const prefix = /^[~^]/.exec(d.spec)?.[0] ?? '';
       pkg[d.field][d.name] = `${prefix}${d.target}`;
     }
-    writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-    regenerateLockfile();
+    withRollback(() => {
+      writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+      regenerateLockfile();
+    });
   }
   const left = updates.filter((d) => exclude.has(d.name));
   print(
