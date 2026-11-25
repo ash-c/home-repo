@@ -87,6 +87,23 @@ const directDependencies = () => {
   return deps;
 };
 
+// Locked version of every direct declaration, including optional and peer, from a v1-v3 lockfile.
+const lockedDirectVersions = () => {
+  const pkg = readJson('package.json');
+  const lock = readJson('package-lock.json');
+  const fields = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
+  const names = new Set(fields.flatMap((f) => Object.keys(pkg[f] ?? {})));
+  return new Map(
+    [...names].map((name) => [
+      name,
+      // v1 lockfiles record aliases as "npm:target@1.2.3".
+      (
+        lock.packages?.[`node_modules/${name}`]?.version ?? lock.dependencies?.[name]?.version
+      )?.replace(/^npm:.+@/, ''),
+    ]),
+  );
+};
+
 const outdated = async () => {
   const deps = directDependencies();
   const results = await Promise.all(
@@ -123,7 +140,11 @@ const outdated = async () => {
 
 const audit = (omitDev) => {
   const out = npm(['audit', '--json', ...(omitDev ? ['--omit=dev'] : [])], { allowFailure: true });
-  return JSON.parse(out).vulnerabilities ?? {};
+  const result = JSON.parse(out);
+  if (result.error || !result.vulnerabilities) {
+    throw new Error(`npm audit failed: ${result.error?.summary ?? 'no vulnerabilities in output'}`);
+  }
+  return result.vulnerabilities;
 };
 
 // One row per (package, advisory) pair, flattened from npm audit's vulnerability tree.
@@ -215,6 +236,20 @@ const regenerateLockfile = () => {
   }
 };
 
+// Restore package.json and package-lock.json if fn throws (e.g. npm rejects a peer conflict).
+const withRollback = (fn) => {
+  const saved = ['package.json', 'package-lock.json'].map((f) => [f, readFileSync(f, 'utf8')]);
+  try {
+    return fn();
+  } catch (error) {
+    for (const [f, text] of saved) writeFileSync(f, text);
+    console.error(
+      'Restored package.json and package-lock.json; run `npm ci` to resync node_modules.',
+    );
+    throw error;
+  }
+};
+
 const print = (json, markdown) =>
   process.stdout.write(flag('json') ? JSON.stringify(json, null, 2) + '\n' : markdown);
 
@@ -248,7 +283,32 @@ const security = () => {
     return;
   }
   // Exits non-zero while anything stays vulnerable, so check the result by re-auditing.
-  npm(['audit', 'fix', '--no-fund'], { allowFailure: true });
+  // --no-force overrides any force=true from .npmrc or the environment. A direct dependency
+  // whose declared range spans majors can still move to a new major, so roll that back.
+  withRollback(() => {
+    const was = lockedDirectVersions();
+    const out = npm(['audit', 'fix', '--json', '--no-force', '--no-fund'], { allowFailure: true });
+    // Output can be empty (loglevel=silent) or mixed with script output; the re-audit below
+    // checks the result either way, so only an explicit npm error document fails here.
+    const error = (() => {
+      try {
+        return JSON.parse(out).error;
+      } catch {
+        return undefined;
+      }
+    })();
+    if (error) throw new Error(`npm audit fix failed: ${error.summary}`);
+    const now = lockedDirectVersions();
+    const crossed = [...now].filter(([name, to]) => {
+      const a = parseVersion(was.get(name) ?? '');
+      const b = parseVersion(to ?? '');
+      return a && b && !sameLine(a, b);
+    });
+    if (crossed.length > 0) {
+      const moves = crossed.map(([name, to]) => `${name} ${was.get(name)} → ${to}`).join(', ');
+      throw new Error(`npm audit fix moved a direct dependency to a new major (${moves})`);
+    }
+  });
 
   // npm audit fix won't move an exact or narrow direct pin; bump those within their major.
   const pkg = readJson('package.json');
@@ -265,8 +325,10 @@ const security = () => {
     }
   }
   if (bumped) {
-    writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-    regenerateLockfile();
+    withRollback(() => {
+      writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+      regenerateLockfile();
+    });
   } else if (flag('nested')) {
     regenerateLockfile();
   }
@@ -299,8 +361,10 @@ const update = async () => {
       const prefix = /^[~^]/.exec(d.spec)?.[0] ?? '';
       pkg[d.field][d.name] = `${prefix}${d.target}`;
     }
-    writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-    regenerateLockfile();
+    withRollback(() => {
+      writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+      regenerateLockfile();
+    });
   }
   const left = updates.filter((d) => exclude.has(d.name));
   print(
