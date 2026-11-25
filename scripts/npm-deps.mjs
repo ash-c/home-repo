@@ -96,7 +96,10 @@ const lockedDirectVersions = () => {
   return new Map(
     [...names].map((name) => [
       name,
-      lock.packages?.[`node_modules/${name}`]?.version ?? lock.dependencies?.[name]?.version,
+      // v1 lockfiles record aliases as "npm:target@1.2.3".
+      (
+        lock.packages?.[`node_modules/${name}`]?.version ?? lock.dependencies?.[name]?.version
+      )?.replace(/^npm:.+@/, ''),
     ]),
   );
 };
