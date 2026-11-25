@@ -123,7 +123,11 @@ const outdated = async () => {
 
 const audit = (omitDev) => {
   const out = npm(['audit', '--json', ...(omitDev ? ['--omit=dev'] : [])], { allowFailure: true });
-  return JSON.parse(out).vulnerabilities ?? {};
+  const result = JSON.parse(out);
+  if (result.error || !result.vulnerabilities) {
+    throw new Error(`npm audit failed: ${result.error?.summary ?? 'no vulnerabilities in output'}`);
+  }
+  return result.vulnerabilities;
 };
 
 // One row per (package, advisory) pair, flattened from npm audit's vulnerability tree.
