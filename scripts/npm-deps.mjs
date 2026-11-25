@@ -226,7 +226,9 @@ const withRollback = (fn) => {
     return fn();
   } catch (error) {
     for (const [f, text] of saved) writeFileSync(f, text);
-    console.error('Restored package.json and package-lock.json; run `npm ci` to resync node_modules.');
+    console.error(
+      'Restored package.json and package-lock.json; run `npm ci` to resync node_modules.',
+    );
     throw error;
   }
 };
@@ -264,7 +266,21 @@ const security = () => {
     return;
   }
   // Exits non-zero while anything stays vulnerable, so check the result by re-auditing.
-  npm(['audit', 'fix', '--no-fund'], { allowFailure: true });
+  // --no-force overrides any force=true from .npmrc or the environment. A direct dependency
+  // whose declared range spans majors can still move to a new major, so roll that back.
+  withRollback(() => {
+    const was = new Map(directDependencies().map((d) => [d.name, d.current]));
+    npm(['audit', 'fix', '--no-force', '--no-fund'], { allowFailure: true });
+    const crossed = directDependencies().filter((d) => {
+      const from = parseVersion(was.get(d.name) ?? '');
+      const to = parseVersion(d.current ?? '');
+      return from && to && !sameLine(from, to);
+    });
+    if (crossed.length > 0) {
+      const moves = crossed.map((d) => `${d.name} ${was.get(d.name)} → ${d.current}`).join(', ');
+      throw new Error(`npm audit fix moved a direct dependency to a new major (${moves})`);
+    }
+  });
 
   // npm audit fix won't move an exact or narrow direct pin; bump those within their major.
   const pkg = readJson('package.json');
